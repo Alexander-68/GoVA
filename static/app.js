@@ -4,6 +4,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     const videoStream = document.getElementById('videoStream');
     const playPauseBtn = document.getElementById('playPauseBtn');
+    const playBackBtn = document.getElementById('playBackBtn');
     const stepBackBtn = document.getElementById('stepBackBtn');
     const stepFwdBtn = document.getElementById('stepFwdBtn');
     
@@ -17,6 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusDiv = document.getElementById('status');
     
     let isPlaying = false;
+    let playDirection = 1;
     let isSeeking = false;
     let totalFrames = 0;
     let currentFile = "";
@@ -28,7 +30,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const state = JSON.parse(event.data);
         
         isPlaying = state.playing;
+        playDirection = state.playDirection || 1;
         playPauseBtn.textContent = isPlaying ? '⏸' : '▶';
+        playBackBtn.textContent = isPlaying && playDirection < 0 ? '⏸' : '◀';
         
         if (state.file && fileInput.value === '') {
             fileInput.value = state.file;
@@ -54,7 +58,8 @@ document.addEventListener('DOMContentLoaded', () => {
             fpsInput.value = state.playFPS;
         }
         
-        statusDiv.textContent = `File: ${state.file || 'None'} | Native FPS: ${state.fps ? state.fps.toFixed(2) : 0}`;
+        const playbackDirection = playDirection < 0 ? 'Reverse' : 'Forward';
+        statusDiv.textContent = `File: ${state.file || 'None'} | Native FPS: ${state.fps ? state.fps.toFixed(2) : 0} | Direction: ${playbackDirection}`;
     };
 
     // API commands
@@ -77,6 +82,14 @@ document.addEventListener('DOMContentLoaded', () => {
             postCmd('/api/pause', {});
         } else {
             postCmd('/api/play', {});
+        }
+    };
+
+    playBackBtn.onclick = () => {
+        if (isPlaying && playDirection < 0) {
+            postCmd('/api/pause', {});
+        } else {
+            postCmd('/api/play-backward', {});
         }
     };
 

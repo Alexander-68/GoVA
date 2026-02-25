@@ -29,6 +29,7 @@ func main() {
 
 	http.HandleFunc("/api/load", handleLoad)
 	http.HandleFunc("/api/play", handlePlay)
+	http.HandleFunc("/api/play-backward", handlePlayBackward)
 	http.HandleFunc("/api/pause", handlePause)
 	http.HandleFunc("/api/step", handleStep)
 	http.HandleFunc("/api/seek", handleSeek)
@@ -59,6 +60,11 @@ func handleLoad(w http.ResponseWriter, r *http.Request) {
 
 func handlePlay(w http.ResponseWriter, r *http.Request) {
 	p.Play()
+	w.WriteHeader(http.StatusOK)
+}
+
+func handlePlayBackward(w http.ResponseWriter, r *http.Request) {
+	p.PlayBackward()
 	w.WriteHeader(http.StatusOK)
 }
 

@@ -14,13 +14,14 @@ import (
 )
 
 type State struct {
-	File         string  `json:"file"`
-	Playing      bool    `json:"playing"`
-	FPS          float64 `json:"fps"`
-	PlayFPS      float64 `json:"playFPS"`
-	Duration     float64 `json:"duration"`
-	TotalFrames  int     `json:"totalFrames"`
-	CurrentFrame int     `json:"currentFrame"`
+	File          string  `json:"file"`
+	Playing       bool    `json:"playing"`
+	PlayDirection int     `json:"playDirection"`
+	FPS           float64 `json:"fps"`
+	PlayFPS       float64 `json:"playFPS"`
+	Duration      float64 `json:"duration"`
+	TotalFrames   int     `json:"totalFrames"`
+	CurrentFrame  int     `json:"currentFrame"`
 }
 
 type Player struct {
@@ -44,7 +45,8 @@ type Player struct {
 func NewPlayer() *Player {
 	p := &Player{
 		state: State{
-			PlayFPS: 30.0,
+			PlayFPS:       30.0,
+			PlayDirection: 1,
 		},
 		playChan:   make(chan bool, 1),
 		seekChan:   make(chan int, 1),
@@ -78,6 +80,7 @@ func (p *Player) Load(file string) error {
 	p.state.TotalFrames = totalFrames
 	p.state.CurrentFrame = 0
 	p.state.Playing = false
+	p.state.PlayDirection = 1
 	p.mu.Unlock()
 
 	p.seekChan <- 0
@@ -85,6 +88,16 @@ func (p *Player) Load(file string) error {
 }
 
 func (p *Player) Play() {
+	p.mu.Lock()
+	p.state.PlayDirection = 1
+	p.mu.Unlock()
+	p.playChan <- true
+}
+
+func (p *Player) PlayBackward() {
+	p.mu.Lock()
+	p.state.PlayDirection = -1
+	p.mu.Unlock()
 	p.playChan <- true
 }
 
@@ -108,6 +121,42 @@ func (p *Player) SetFPS(fps float64) {
 
 func (p *Player) loop() {
 	var lastTick time.Time
+	seekAndRender := func(targetFrame int, resumePlaying bool) {
+		p.mu.Lock()
+		if p.state.File == "" || p.state.TotalFrames <= 0 {
+			p.state.Playing = false
+			p.mu.Unlock()
+			p.broadcastState()
+			return
+		}
+		if targetFrame < 0 {
+			targetFrame = 0
+		}
+		if targetFrame >= p.state.TotalFrames {
+			targetFrame = p.state.TotalFrames - 1
+		}
+		p.mu.Unlock()
+
+		p.restartFFmpeg(targetFrame)
+
+		img, ok := p.readFrame(2 * time.Second)
+
+		p.mu.Lock()
+		p.state.CurrentFrame = targetFrame
+		if ok {
+			p.currentImage = img
+		}
+		p.state.Playing = resumePlaying && ok
+		if p.state.Playing {
+			lastTick = time.Now()
+		}
+		p.mu.Unlock()
+
+		if ok && img != nil {
+			p.broadcastImage(img)
+		}
+		p.broadcastState()
+	}
 
 	for {
 		select {
@@ -138,20 +187,7 @@ func (p *Player) loop() {
 			p.state.Playing = false
 			p.mu.Unlock()
 
-			p.restartFFmpeg(targetFrame)
-
-			img := <-p.frameChan
-			p.mu.Lock()
-			p.state.CurrentFrame = targetFrame
-			p.currentImage = img
-			p.state.Playing = wasPlaying
-			if wasPlaying {
-				lastTick = time.Now()
-			}
-			p.mu.Unlock()
-
-			p.broadcastImage(img)
-			p.broadcastState()
+			seekAndRender(targetFrame, wasPlaying)
 
 		case delta := <-p.stepChan:
 			p.mu.Lock()
@@ -169,30 +205,16 @@ func (p *Player) loop() {
 			}
 			p.mu.Unlock()
 
-			if delta > 0 && delta <= 30 {
-				var img []byte
-				for i := 0; i < delta; i++ {
-					img = <-p.frameChan
-					p.mu.Lock()
-					p.state.CurrentFrame++
-					p.mu.Unlock()
-				}
-				if img != nil {
-					p.mu.Lock()
-					p.currentImage = img
-					p.mu.Unlock()
-					p.broadcastImage(img)
-				}
-				p.broadcastState()
-			} else {
-				p.seekChan <- target
-			}
+			seekAndRender(target, false)
 
 		default:
 			p.mu.Lock()
 			playing := p.state.Playing
+			playDirection := p.state.PlayDirection
 			playFPS := p.state.PlayFPS
 			file := p.state.File
+			currentFrame := p.state.CurrentFrame
+			totalFrames := p.state.TotalFrames
 			p.mu.Unlock()
 
 			if !playing || file == "" {
@@ -211,30 +233,82 @@ func (p *Player) loop() {
 					expectedFrames = 1
 				}
 
-				var img []byte
-				for i := 0; i < expectedFrames; i++ {
-					img = <-p.frameChan
+				if totalFrames <= 0 {
 					p.mu.Lock()
-					if p.state.CurrentFrame < p.state.TotalFrames-1 {
-						p.state.CurrentFrame++
-					} else {
-						p.state.Playing = false
+					p.state.Playing = false
+					p.mu.Unlock()
+					p.broadcastState()
+					continue
+				}
+
+				if playDirection < 0 {
+					target := currentFrame - expectedFrames
+					target %= totalFrames
+					if target < 0 {
+						target += totalFrames
+					}
+					seekAndRender(target, true)
+					continue
+				}
+
+				var img []byte
+				loopToStart := false
+				stalled := false
+				for i := 0; i < expectedFrames; i++ {
+					p.mu.RLock()
+					atEnd := p.state.CurrentFrame >= p.state.TotalFrames-1
+					p.mu.RUnlock()
+					if atEnd {
+						loopToStart = true
 						break
 					}
+
+					frame, ok := p.readFrame(750 * time.Millisecond)
+					if !ok {
+						stalled = true
+						break
+					}
+					img = frame
+					p.mu.Lock()
+					p.state.CurrentFrame++
+					p.currentImage = img
 					p.mu.Unlock()
 				}
 
 				if img != nil {
-					p.mu.Lock()
-					p.currentImage = img
-					p.mu.Unlock()
 					p.broadcastImage(img)
-					p.broadcastState()
+				}
+				p.broadcastState()
+
+				if loopToStart {
+					seekAndRender(0, true)
+				} else if stalled {
+					p.mu.RLock()
+					cur := p.state.CurrentFrame
+					total := p.state.TotalFrames
+					p.mu.RUnlock()
+
+					if total > 1 && cur >= total-2 {
+						seekAndRender(0, true)
+					} else {
+						seekAndRender(cur+1, true)
+					}
 				}
 			} else {
 				time.Sleep(2 * time.Millisecond)
 			}
 		}
+	}
+}
+
+func (p *Player) readFrame(timeout time.Duration) ([]byte, bool) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case img := <-p.frameChan:
+		return img, true
+	case <-timer.C:
+		return nil, false
 	}
 }
 

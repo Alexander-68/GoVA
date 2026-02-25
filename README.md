@@ -12,6 +12,8 @@ GoVA is a minimal, frame-accurate video annotation tool powered by a Go backend 
 - **Backend-Driven Playback**: The Go backend determines the precise frame position. The browser acts merely as a thin display layer.
 - **Anywhere in filesystem**: Load video files by passing an absolute path from the CLI or via the web UI.
 - **Responsive Controls**: Seek via frame number, step accurately by individual frames (-1 / +1), and dynamic framerate overrides (1 to 240 fps).
+- **Bidirectional Playback**: Play forward or backward from the backend, including reverse-play button support in the UI.
+- **Infinite Loop Playback**: Playback wraps automatically at boundaries (end -> start, start -> end) instead of stopping.
 - **Graceful Frame-Skipping**: If playback is configured higher than system decoding capabilities (e.g., 240 fps), the backend automatically drops MJPEG broadcasts while maintaining precise logical frame advancement (render one, skip three).
 
 ## Usage
