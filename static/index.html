@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GoVA: VideoAnnotate</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>GoVA</h1>
+            <div class="load-section">
+                <input type="text" id="fileInput" placeholder="/absolute/path/to/video.mp4">
+                <button id="loadBtn">Load Video</button>
+            </div>
+        </header>
+
+        <main>
+            <div class="video-container">
+                <img id="videoStream" src="" alt="Video Stream">
+            </div>
+            
+            <div class="controls-container">
+                <div class="playback-controls">
+                    <button id="stepBackBtn" title="Step Back (-1)">⏮</button>
+                    <button id="playPauseBtn" title="Play/Pause">▶</button>
+                    <button id="stepFwdBtn" title="Step Forward (+1)">⏭</button>
+                </div>
+                
+                <div class="frame-controls">
+                    <label for="frameInput">Frame:</label>
+                    <input type="number" id="frameInput" min="0" value="0">
+                    <span id="totalFramesDisplay">/ 0</span>
+                    <input type="range" id="frameSlider" min="0" value="0">
+                </div>
+
+                <div class="fps-controls">
+                    <label for="fpsInput">FPS:</label>
+                    <input type="number" id="fpsInput" min="1" max="240" value="30">
+                    <button id="setFpsBtn">Set</button>
+                </div>
+            </div>
+            
+            <div id="status">Waiting for video...</div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
