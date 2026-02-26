@@ -40,24 +40,64 @@ type Player struct {
 
 	streamSubs map[chan []byte]struct{}
 	stateSubs  map[chan State]struct{}
+
+	maxCacheSize int
+	cache        map[int][]byte
+	cacheKeys    []int
+	cacheMu      sync.RWMutex
 }
 
-func NewPlayer() *Player {
+func NewPlayer(maxCacheSize int) *Player {
 	p := &Player{
 		state: State{
 			PlayFPS:       30.0,
 			PlayDirection: 1,
 		},
-		playChan:   make(chan bool, 1),
-		seekChan:   make(chan int, 1),
-		stepChan:   make(chan int, 1),
-		fpsChan:    make(chan float64, 1),
-		frameChan:  make(chan []byte, 100),
-		streamSubs: make(map[chan []byte]struct{}),
-		stateSubs:  make(map[chan State]struct{}),
+		playChan:     make(chan bool, 1),
+		seekChan:     make(chan int, 1),
+		stepChan:     make(chan int, 1),
+		fpsChan:      make(chan float64, 1),
+		frameChan:    make(chan []byte, 100),
+		streamSubs:   make(map[chan []byte]struct{}),
+		stateSubs:    make(map[chan State]struct{}),
+		maxCacheSize: maxCacheSize,
+		cache:        make(map[int][]byte),
+		cacheKeys:    make([]int, 0, maxCacheSize),
 	}
 	go p.loop()
 	return p
+}
+
+func (p *Player) setCache(frame int, img []byte) {
+	if p.maxCacheSize <= 0 {
+		return
+	}
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+
+	if _, exists := p.cache[frame]; !exists {
+		if len(p.cacheKeys) >= p.maxCacheSize {
+			oldest := p.cacheKeys[0]
+			p.cacheKeys = p.cacheKeys[1:]
+			delete(p.cache, oldest)
+		}
+		p.cacheKeys = append(p.cacheKeys, frame)
+	}
+	p.cache[frame] = img
+}
+
+func (p *Player) getCache(frame int) ([]byte, bool) {
+	p.cacheMu.RLock()
+	defer p.cacheMu.RUnlock()
+	img, ok := p.cache[frame]
+	return img, ok
+}
+
+func (p *Player) clearCache() {
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+	p.cache = make(map[int][]byte)
+	p.cacheKeys = make([]int, 0, p.maxCacheSize)
 }
 
 func (p *Player) Load(file string) error {
@@ -71,6 +111,8 @@ func (p *Player) Load(file string) error {
 	}
 
 	totalFrames := int(duration * fps)
+
+	p.clearCache()
 
 	p.mu.Lock()
 	p.state.File = file
@@ -119,6 +161,88 @@ func (p *Player) SetFPS(fps float64) {
 	}
 }
 
+func (p *Player) fetchChunk(startFrame, endFrame int) {
+	p.mu.RLock()
+	file := p.state.File
+	fps := p.state.FPS
+	p.mu.RUnlock()
+
+	if file == "" || startFrame > endFrame {
+		return
+	}
+
+	timeSec := float64(startFrame) / fps
+	frameCount := endFrame - startFrame + 1
+
+	cmd := exec.Command("ffmpeg",
+		"-ss", fmt.Sprintf("%.3f", timeSec),
+		"-i", file,
+		"-frames:v", strconv.Itoa(frameCount),
+		"-f", "image2pipe",
+		"-vcodec", "mjpeg",
+		"-vf", "scale=1280:720:force_original_aspect_ratio=decrease",
+		"-q:v", "2",
+		"-",
+	)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Printf("fetchChunk stdout pipe error: %v", err)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		log.Printf("fetchChunk start error: %v", err)
+		return
+	}
+
+	p.parseJPEGsAndCache(stdout, startFrame, nil)
+	cmd.Wait()
+}
+
+func (p *Player) parseJPEGsAndCache(r io.Reader, startFrame int, frameChan chan<- []byte) {
+	buf := make([]byte, 1024*1024)
+	n := 0
+	currentFrame := startFrame
+	for {
+		m, err := r.Read(buf[n:])
+		n += m
+
+		for {
+			soi := bytes.Index(buf[:n], []byte{0xFF, 0xD8})
+			if soi == -1 {
+				if n > 0 {
+					copy(buf, buf[n-1:])
+					n = 1
+				}
+				break
+			}
+			eoi := bytes.Index(buf[soi:], []byte{0xFF, 0xD9})
+			if eoi == -1 {
+				copy(buf, buf[soi:])
+				n = n - soi
+				break
+			}
+			eoi += soi + 2
+
+			frameBytes := make([]byte, eoi-soi)
+			copy(frameBytes, buf[soi:eoi])
+
+			p.setCache(currentFrame, frameBytes)
+			currentFrame++
+
+			if frameChan != nil {
+				frameChan <- frameBytes
+			}
+
+			copy(buf, buf[eoi:])
+			n = n - eoi
+		}
+
+		if err != nil {
+			break
+		}
+	}
+}
+
 func (p *Player) loop() {
 	var lastTick time.Time
 	seekAndRender := func(targetFrame int, resumePlaying bool) {
@@ -136,6 +260,29 @@ func (p *Player) loop() {
 			targetFrame = p.state.TotalFrames - 1
 		}
 		p.mu.Unlock()
+
+		if img, ok := p.getCache(targetFrame); ok {
+			p.mu.Lock()
+			p.state.CurrentFrame = targetFrame
+			p.currentImage = img
+			p.state.Playing = resumePlaying
+			if resumePlaying {
+				lastTick = time.Now()
+			}
+			p.mu.Unlock()
+
+			p.broadcastImage(img)
+			p.broadcastState()
+
+			p.mu.RLock()
+			playDir := p.state.PlayDirection
+			p.mu.RUnlock()
+
+			if resumePlaying && playDir > 0 {
+				p.restartFFmpeg(targetFrame)
+			}
+			return
+		}
 
 		p.restartFFmpeg(targetFrame)
 
@@ -205,6 +352,16 @@ func (p *Player) loop() {
 			}
 			p.mu.Unlock()
 
+			if delta < 0 {
+				if _, ok := p.getCache(target); !ok {
+					chunkStart := target - 60
+					if chunkStart < 0 {
+						chunkStart = 0
+					}
+					p.fetchChunk(chunkStart, target)
+				}
+			}
+
 			seekAndRender(target, false)
 
 		default:
@@ -247,7 +404,32 @@ func (p *Player) loop() {
 					if target < 0 {
 						target += totalFrames
 					}
-					seekAndRender(target, true)
+
+					if img, ok := p.getCache(target); ok {
+						p.mu.Lock()
+						p.state.CurrentFrame = target
+						p.currentImage = img
+						p.mu.Unlock()
+						p.broadcastImage(img)
+						p.broadcastState()
+					} else {
+						chunkStart := target - 120
+						if chunkStart < 0 {
+							chunkStart = 0
+						}
+						p.fetchChunk(chunkStart, target)
+
+						if img, ok := p.getCache(target); ok {
+							p.mu.Lock()
+							p.state.CurrentFrame = target
+							p.currentImage = img
+							p.mu.Unlock()
+							p.broadcastImage(img)
+						} else {
+							seekAndRender(target, true)
+						}
+						p.broadcastState()
+					}
 					continue
 				}
 
@@ -359,50 +541,7 @@ drain:
 		return
 	}
 
-	go readJPEGs(stdout, p.frameChan)
-}
-
-func readJPEGs(r io.Reader, frameChan chan<- []byte) {
-	buf := make([]byte, 1024*1024)
-	n := 0
-	for {
-		m, err := r.Read(buf[n:])
-		n += m
-		if err != nil && err != io.EOF {
-			return
-		}
-
-		for {
-			soi := bytes.Index(buf[:n], []byte{0xFF, 0xD8})
-			if soi == -1 {
-				if n > 0 {
-					copy(buf, buf[n-1:])
-					n = 1
-				}
-				break
-			}
-			eoi := bytes.Index(buf[soi:], []byte{0xFF, 0xD9})
-			if eoi == -1 {
-				copy(buf, buf[soi:])
-				n = n - soi
-				break
-			}
-			eoi += soi + 2
-
-			frame := make([]byte, eoi-soi)
-			copy(frame, buf[soi:eoi])
-
-			// Non-blocking write doesn't work here since we want backpressure
-			// to strictly sync ffmpeg output to actual consumption by the player
-			frameChan <- frame
-
-			copy(buf, buf[eoi:])
-			n = n - eoi
-		}
-		if err == io.EOF {
-			break
-		}
-	}
+	go p.parseJPEGsAndCache(stdout, frame, p.frameChan)
 }
 
 func getMetadata(file string) (float64, float64, error) {

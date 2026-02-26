@@ -13,6 +13,7 @@ GoVA is a minimal, frame-accurate video annotation tool powered by a Go backend 
 - **Anywhere in filesystem**: Load video files by passing an absolute path from the CLI or via the web UI.
 - **Responsive Controls**: Seek via frame number, step accurately by individual frames (-1 / +1), and dynamic framerate overrides (1 to 240 fps).
 - **Bidirectional Playback**: Play forward or backward from the backend, including reverse-play button support in the UI.
+- **High-Performance Scrubbing**: A bidirectional LRU frame cache ensures perfectly instantaneous backward stepping, backward playback, and scrubbing without launching new decoder processes per frame.
 - **Infinite Loop Playback**: Playback wraps automatically at boundaries (end -> start, start -> end) instead of stopping.
 - **Graceful Frame-Skipping**: If playback is configured higher than system decoding capabilities (e.g., 240 fps), the backend automatically drops MJPEG broadcasts while maintaining precise logical frame advancement (render one, skip three).
 
@@ -22,10 +23,13 @@ GoVA is a minimal, frame-accurate video annotation tool powered by a Go backend 
    ```bash
    go run .
    ```
-   *Optionally pass a video path to load immediately:*
+   *Available CLI arguments:*
    ```bash
-   go run . -file /absolute/path/to/video.mkv
+   go run . -file /absolute/path/to/video.mkv -port 8080 -cache 1000
    ```
+   - `-file`: Load a video immediately on startup.
+   - `-port`: The HTTP server port (default: 8080).
+   - `-cache`: Number of decoded MJPEG frames to keep in memory for instantaneous scrubbing and backward playback (default: 1000).
 
 2. Open your browser to `http://localhost:8080`.
 

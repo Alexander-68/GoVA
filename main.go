@@ -14,9 +14,10 @@ var p *Player
 func main() {
 	var fileFlag = flag.String("file", "", "Path to video file to load initially")
 	var portFlag = flag.Int("port", 8080, "Port to run the web server on")
+	var cacheFlag = flag.Int("cache", 1000, "Number of frames to cache in memory for smooth scrubbing and backward play")
 	flag.Parse()
 
-	p = NewPlayer()
+	p = NewPlayer(*cacheFlag)
 
 	if *fileFlag != "" {
 		err := p.Load(*fileFlag)
