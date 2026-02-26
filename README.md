@@ -12,6 +12,10 @@ GoVA is a minimal, frame-accurate video annotation tool powered by a Go backend 
 - **Backend-Driven Playback**: The Go backend determines the precise frame position. The browser acts merely as a thin display layer.
 - **Anywhere in filesystem**: Load video files by passing an absolute path from the CLI or via the web UI.
 - **Responsive Controls**: Seek via frame number, step accurately by individual frames (-1 / +1), and dynamic framerate overrides (1 to 240 fps).
+- **Pause-Only Frame Input Editing**: During playback, the frame number field is display-only. Entering a target frame number is enabled only while paused.
+- **Latest-Frame Stream Delivery**: The MJPEG broadcaster drops stale queued frames per subscriber so pause/seek/step actions show the intended frame immediately instead of an older buffered frame.
+- **Frame Watermark Toggle**: UI button toggles an in-video frame-number watermark (`Frame N`) for easier verification during seek/step debugging.
+- **Paused Single-Frame Rebroadcast**: Seek/step actions while paused rebroadcast the resolved frame shortly after the first emit to reduce stale first-frame artifacts in MJPEG consumers.
 - **Bidirectional Playback**: Play forward or backward from the backend, including reverse-play button support in the UI.
 - **High-Performance Scrubbing**: A bidirectional LRU frame cache ensures instantaneous stepping and scrubbing without launching new decoder processes per frame.
 - **Smooth Reverse Playback**: Reverse playback uses a chunk-aligned triple-buffer prefetch queue in the background (including across start/end wrap), so chunk decoding happens ahead of time instead of stalling the playback loop at cache boundaries.
@@ -49,6 +53,15 @@ GoVA is a minimal, frame-accurate video annotation tool powered by a Go backend 
    - `Space`: Play/Pause
    - `Right Arrow`: Step Forward 1 frame
    - `Left Arrow`: Step Backward 1 frame
+
+## Testing
+
+- Run all tests (including integration tests): `go test ./...`
+- Skip integration tests: `go test -short ./...`
+- Integration tests generate a temporary synthetic video via `ffmpeg` and verify:
+  - seek after pause shows the requested frame (no stale decoder frame),
+  - pause+seek flushes buffered stream frames to the newest frame,
+  - first prev-step after pause shows the actual previous frame.
 
 ## Architecture
 

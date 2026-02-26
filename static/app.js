@@ -11,9 +11,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const frameInput = document.getElementById('frameInput');
     const frameSlider = document.getElementById('frameSlider');
     const totalFramesDisplay = document.getElementById('totalFramesDisplay');
+    const frameWatermark = document.getElementById('frameWatermark');
     
     const fpsInput = document.getElementById('fpsInput');
     const setFpsBtn = document.getElementById('setFpsBtn');
+    const watermarkToggleBtn = document.getElementById('watermarkToggleBtn');
     
     const statusDiv = document.getElementById('status');
     
@@ -22,6 +24,16 @@ document.addEventListener('DOMContentLoaded', () => {
     let isSeeking = false;
     let totalFrames = 0;
     let currentFile = "";
+    let watermarkEnabled = localStorage.getItem('gova.watermark') !== '0';
+
+    const applyWatermarkVisibility = () => {
+        const visible = watermarkEnabled && !!currentFile;
+        frameWatermark.style.display = visible ? 'block' : 'none';
+        watermarkToggleBtn.textContent = watermarkEnabled ? 'Watermark: ON' : 'Watermark: OFF';
+        watermarkToggleBtn.classList.toggle('toggle-off', !watermarkEnabled);
+    };
+
+    applyWatermarkVisibility();
 
     // Connect Server-Sent Events for state updates
     const stateSource = new EventSource('/state');
@@ -46,12 +58,16 @@ document.addEventListener('DOMContentLoaded', () => {
             frameInput.value = state.currentFrame;
             frameSlider.value = state.currentFrame;
         }
+        frameInput.disabled = isPlaying;
+        frameInput.title = isPlaying ? 'Pause playback to enter a frame number' : '';
 
         // Handle stream initialization or file change
         if (state.file && state.file !== currentFile) {
             currentFile = state.file;
             videoStream.src = `/stream?t=${Date.now()}`;
+            applyWatermarkVisibility();
         }
+        frameWatermark.textContent = `Frame ${state.currentFrame}`;
         
         // If not actively typing in FPS input, update it
         if (document.activeElement !== fpsInput) {
@@ -118,7 +134,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    frameInput.onchange = (e) => seekToFrame(parseInt(e.target.value));
+    frameInput.onchange = (e) => {
+        if (isPlaying) {
+            e.target.value = frameSlider.value;
+            return;
+        }
+        seekToFrame(parseInt(e.target.value, 10));
+    };
     
     frameSlider.oninput = (e) => {
         isSeeking = true;
@@ -135,6 +157,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (fps > 0) {
             postCmd('/api/fps', { fps });
         }
+    };
+
+    watermarkToggleBtn.onclick = () => {
+        watermarkEnabled = !watermarkEnabled;
+        localStorage.setItem('gova.watermark', watermarkEnabled ? '1' : '0');
+        applyWatermarkVisibility();
     };
 
     // Keyboard shortcuts

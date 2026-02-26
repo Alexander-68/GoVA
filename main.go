@@ -122,7 +122,17 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case img := <-ch:
-			if err := writeFrame(w, img); err != nil {
+			latest := img
+		drain:
+			for {
+				select {
+				case next := <-ch:
+					latest = next
+				default:
+					break drain
+				}
+			}
+			if err := writeFrame(w, latest); err != nil {
 				return
 			}
 		}

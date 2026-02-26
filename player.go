@@ -45,6 +45,8 @@ type Player struct {
 
 	frameChan    chan []byte
 	currentImage []byte
+	decoderWG    sync.WaitGroup
+	decoderStop  chan struct{}
 
 	streamSubs map[chan []byte]struct{}
 	stateSubs  map[chan State]struct{}
@@ -430,15 +432,23 @@ func (p *Player) fetchChunk(startFrame, endFrame int) {
 		return
 	}
 
-	p.parseJPEGsAndCache(stdout, startFrame, nil)
+	p.parseJPEGsAndCache(stdout, startFrame, nil, nil)
 	cmd.Wait()
 }
 
-func (p *Player) parseJPEGsAndCache(r io.Reader, startFrame int, frameChan chan<- []byte) {
+func (p *Player) parseJPEGsAndCache(r io.Reader, startFrame int, frameChan chan<- []byte, stop <-chan struct{}) {
 	buf := make([]byte, 1024*1024)
 	n := 0
 	currentFrame := startFrame
 	for {
+		if stop != nil {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+		}
+
 		m, err := r.Read(buf[n:])
 		n += m
 
@@ -466,7 +476,15 @@ func (p *Player) parseJPEGsAndCache(r io.Reader, startFrame int, frameChan chan<
 			currentFrame++
 
 			if frameChan != nil {
-				frameChan <- frameBytes
+				if stop != nil {
+					select {
+					case frameChan <- frameBytes:
+					case <-stop:
+						return
+					}
+				} else {
+					frameChan <- frameBytes
+				}
 			}
 
 			copy(buf, buf[eoi:])
@@ -513,6 +531,9 @@ func (p *Player) loop() {
 			p.mu.Unlock()
 
 			p.broadcastImage(img)
+			if !resumePlaying {
+				p.rebroadcastPausedFrame(targetFrame, img)
+			}
 			p.broadcastState()
 
 			p.mu.RLock()
@@ -550,6 +571,9 @@ func (p *Player) loop() {
 
 		if ok && img != nil {
 			p.broadcastImage(img)
+			if !resumePlaying {
+				p.rebroadcastPausedFrame(targetFrame, img)
+			}
 		}
 		p.broadcastState()
 
@@ -584,6 +608,10 @@ func (p *Player) loop() {
 				}
 			}
 			p.mu.Unlock()
+
+			if !play {
+				p.stopDecoder()
+			}
 
 			if play && playDir < 0 {
 				p.scheduleDirectionalPrefetch(currentFrame, totalFrames, playDir, 2)
@@ -820,18 +848,25 @@ func (p *Player) readFrame(timeout time.Duration) ([]byte, bool) {
 	}
 }
 
-func (p *Player) restartFFmpeg(frame int) {
-	if _, ok := p.getCache(frame); ok {
-		return
+func (p *Player) stopDecoder() {
+	if p.decoderStop != nil {
+		close(p.decoderStop)
+		p.decoderStop = nil
 	}
 
 	if p.cmd != nil {
-		p.cmd.Process.Kill()
+		if p.cmd.Process != nil {
+			p.cmd.Process.Kill()
+		}
 		p.cmd.Wait()
 		if p.stdoutReader != nil {
 			p.stdoutReader.Close()
 		}
+		p.cmd = nil
+		p.stdoutReader = nil
 	}
+
+	p.decoderWG.Wait()
 
 drain:
 	for {
@@ -841,6 +876,14 @@ drain:
 			break drain
 		}
 	}
+}
+
+func (p *Player) restartFFmpeg(frame int) {
+	if _, ok := p.getCache(frame); ok {
+		return
+	}
+
+	p.stopDecoder()
 
 	p.mu.RLock()
 	file := p.state.File
@@ -868,10 +911,19 @@ drain:
 
 	if err := cmd.Start(); err != nil {
 		log.Printf("Failed to start ffmpeg: %v", err)
+		p.cmd = nil
+		p.stdoutReader = nil
 		return
 	}
 
-	go p.parseJPEGsAndCache(stdout, frame, p.frameChan)
+	decoderStop := make(chan struct{})
+	p.decoderStop = decoderStop
+
+	p.decoderWG.Add(1)
+	go func() {
+		defer p.decoderWG.Done()
+		p.parseJPEGsAndCache(stdout, frame, p.frameChan, decoderStop)
+	}()
 }
 
 func getMetadata(file string) (float64, float64, error) {
@@ -966,11 +1018,38 @@ func (p *Player) broadcastImage(img []byte) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for ch := range p.streamSubs {
+		drained := false
+		for !drained {
+			select {
+			case <-ch:
+			default:
+				drained = true
+			}
+		}
 		select {
 		case ch <- img:
 		default:
 		}
 	}
+}
+
+func (p *Player) rebroadcastPausedFrame(frame int, img []byte) {
+	if img == nil {
+		return
+	}
+
+	go func(expectedFrame int, frameBytes []byte) {
+		time.Sleep(24 * time.Millisecond)
+
+		p.mu.RLock()
+		stillPausedOnFrame := !p.state.Playing && p.state.CurrentFrame == expectedFrame
+		p.mu.RUnlock()
+		if !stillPausedOnFrame {
+			return
+		}
+
+		p.broadcastImage(frameBytes)
+	}(frame, img)
 }
 
 func (p *Player) broadcastState() {

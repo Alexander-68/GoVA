@@ -19,6 +19,7 @@
         <main>
             <div class="video-container">
                 <img id="videoStream" src="" alt="Video Stream">
+                <div id="frameWatermark" class="frame-watermark">Frame 0</div>
             </div>
             
             <div class="controls-container">
@@ -40,6 +41,7 @@
                     <label for="fpsInput">FPS:</label>
                     <input type="number" id="fpsInput" min="1" max="240" value="30">
                     <button id="setFpsBtn">Set</button>
+                    <button id="watermarkToggleBtn" type="button">Watermark: ON</button>
                 </div>
             </div>
             
