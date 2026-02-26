@@ -13,9 +13,21 @@ GoVA is a minimal, frame-accurate video annotation tool powered by a Go backend 
 - **Anywhere in filesystem**: Load video files by passing an absolute path from the CLI or via the web UI.
 - **Responsive Controls**: Seek via frame number, step accurately by individual frames (-1 / +1), and dynamic framerate overrides (1 to 240 fps).
 - **Bidirectional Playback**: Play forward or backward from the backend, including reverse-play button support in the UI.
-- **High-Performance Scrubbing**: A bidirectional LRU frame cache ensures perfectly instantaneous backward stepping, backward playback, and scrubbing without launching new decoder processes per frame.
+- **High-Performance Scrubbing**: A bidirectional LRU frame cache ensures instantaneous stepping and scrubbing without launching new decoder processes per frame.
+- **Smooth Reverse Playback**: Reverse playback uses a chunk-aligned triple-buffer prefetch queue in the background (including across start/end wrap), so chunk decoding happens ahead of time instead of stalling the playback loop at cache boundaries.
+- **Directional Idle Prefetch**: While paused (including after load and slider seeks), prefetch starts in the expected play direction first, then fills the opposite direction after a short delay so playback can resume smoothly either way.
+- **Direction-Scoped Active Prefetch**: While actively playing, prefetch work is constrained to the active playback direction to avoid wasting decode budget.
 - **Infinite Loop Playback**: Playback wraps automatically at boundaries (end -> start, start -> end) instead of stopping.
 - **Graceful Frame-Skipping**: If playback is configured higher than system decoding capabilities (e.g., 240 fps), the backend automatically drops MJPEG broadcasts while maintaining precise logical frame advancement (render one, skip three).
+
+## Prefetch Strategy
+
+- Prefetch works in fixed chunks (default cache `3000` -> three chunks of `1000` frames).
+- Chunk addressing is circular, so prefetch naturally crosses the start/end boundary.
+- While paused (including immediately after load and after slider seeks):
+  - First, prefetch in the expected direction (`PlayDirection`) to reduce start latency.
+  - If still paused after a short delay, prefetch one chunk in the opposite direction so either play direction is ready.
+- While playing, prefetch is constrained to the active play direction only.
 
 ## Usage
 
@@ -25,11 +37,11 @@ GoVA is a minimal, frame-accurate video annotation tool powered by a Go backend 
    ```
    *Available CLI arguments:*
    ```bash
-   go run . -file /absolute/path/to/video.mkv -port 8080 -cache 1000
+   go run . -file /absolute/path/to/video.mkv -port 8080 -cache 3000
    ```
    - `-file`: Load a video immediately on startup.
    - `-port`: The HTTP server port (default: 8080).
-   - `-cache`: Number of decoded MJPEG frames to keep in memory for instantaneous scrubbing and backward playback (default: 1000).
+   - `-cache`: Number of decoded MJPEG frames to keep in memory for instantaneous scrubbing and backward playback (default: 3000, typically split into three 1000-frame reverse-prefetch chunks).
 
 2. Open your browser to `http://localhost:8080`.
 

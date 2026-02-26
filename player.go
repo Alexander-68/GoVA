@@ -24,6 +24,13 @@ type State struct {
 	CurrentFrame  int     `json:"currentFrame"`
 }
 
+type prefetchJob struct {
+	gen   int
+	start int
+	end   int
+	key   string
+}
+
 type Player struct {
 	mu           sync.RWMutex
 	state        State
@@ -45,25 +52,49 @@ type Player struct {
 	cache        map[int][]byte
 	cacheKeys    []int
 	cacheMu      sync.RWMutex
+
+	prefetchMu            sync.Mutex
+	reversePrefetchJobs   chan prefetchJob
+	reversePrefetchQueued map[string]struct{}
+	reversePrefetchGen    int
+	reverseChunkSize      int
+	reverseChunkBuffers   int
 }
 
 func NewPlayer(maxCacheSize int) *Player {
+	reverseChunkBuffers := 3
+	reverseChunkSize := 180
+	if maxCacheSize > 0 {
+		reverseChunkSize = maxCacheSize / reverseChunkBuffers
+		if reverseChunkSize < 90 {
+			reverseChunkSize = 90
+		}
+		if reverseChunkSize > maxCacheSize {
+			reverseChunkSize = maxCacheSize
+		}
+	}
+
 	p := &Player{
 		state: State{
 			PlayFPS:       30.0,
 			PlayDirection: 1,
 		},
-		playChan:     make(chan bool, 1),
-		seekChan:     make(chan int, 1),
-		stepChan:     make(chan int, 1),
-		fpsChan:      make(chan float64, 1),
-		frameChan:    make(chan []byte, 100),
-		streamSubs:   make(map[chan []byte]struct{}),
-		stateSubs:    make(map[chan State]struct{}),
-		maxCacheSize: maxCacheSize,
-		cache:        make(map[int][]byte),
-		cacheKeys:    make([]int, 0, maxCacheSize),
+		playChan:              make(chan bool, 1),
+		seekChan:              make(chan int, 1),
+		stepChan:              make(chan int, 1),
+		fpsChan:               make(chan float64, 1),
+		frameChan:             make(chan []byte, 100),
+		streamSubs:            make(map[chan []byte]struct{}),
+		stateSubs:             make(map[chan State]struct{}),
+		maxCacheSize:          maxCacheSize,
+		cache:                 make(map[int][]byte),
+		cacheKeys:             make([]int, 0, maxCacheSize),
+		reversePrefetchJobs:   make(chan prefetchJob, 24),
+		reversePrefetchQueued: make(map[string]struct{}),
+		reverseChunkSize:      reverseChunkSize,
+		reverseChunkBuffers:   reverseChunkBuffers,
 	}
+	go p.reversePrefetchWorker()
 	go p.loop()
 	return p
 }
@@ -100,6 +131,190 @@ func (p *Player) clearCache() {
 	p.cacheKeys = make([]int, 0, p.maxCacheSize)
 }
 
+func modFrame(frame, totalFrames int) int {
+	if totalFrames <= 0 {
+		return 0
+	}
+	frame %= totalFrames
+	if frame < 0 {
+		frame += totalFrames
+	}
+	return frame
+}
+
+func (p *Player) isRangeCached(startFrame, endFrame int) bool {
+	if startFrame > endFrame {
+		return true
+	}
+
+	p.cacheMu.RLock()
+	defer p.cacheMu.RUnlock()
+	for frame := startFrame; frame <= endFrame; frame++ {
+		if _, ok := p.cache[frame]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (p *Player) resetReversePrefetch() {
+	p.prefetchMu.Lock()
+	p.reversePrefetchGen++
+	p.reversePrefetchQueued = make(map[string]struct{})
+	p.prefetchMu.Unlock()
+
+	for {
+		select {
+		case <-p.reversePrefetchJobs:
+		default:
+			return
+		}
+	}
+}
+
+func (p *Player) queueReversePrefetch(startFrame, endFrame, gen int) {
+	if startFrame > endFrame || p.isRangeCached(startFrame, endFrame) {
+		return
+	}
+
+	key := fmt.Sprintf("%d:%d-%d", gen, startFrame, endFrame)
+
+	p.prefetchMu.Lock()
+	if gen != p.reversePrefetchGen {
+		p.prefetchMu.Unlock()
+		return
+	}
+	if _, exists := p.reversePrefetchQueued[key]; exists {
+		p.prefetchMu.Unlock()
+		return
+	}
+	p.reversePrefetchQueued[key] = struct{}{}
+	p.prefetchMu.Unlock()
+
+	select {
+	case p.reversePrefetchJobs <- prefetchJob{
+		gen:   gen,
+		start: startFrame,
+		end:   endFrame,
+		key:   key,
+	}:
+	default:
+		p.prefetchMu.Lock()
+		delete(p.reversePrefetchQueued, key)
+		p.prefetchMu.Unlock()
+	}
+}
+
+func (p *Player) scheduleDirectionalPrefetch(anchorFrame, totalFrames, direction, buffers int) {
+	if p.maxCacheSize <= 0 || totalFrames <= 0 {
+		return
+	}
+	if direction == 0 {
+		direction = 1
+	}
+
+	chunkSize := p.reverseChunkSize
+	if chunkSize < 1 {
+		chunkSize = 1
+	}
+	if buffers < 1 {
+		buffers = 1
+	}
+	if buffers > p.reverseChunkBuffers {
+		buffers = p.reverseChunkBuffers
+	}
+	if buffers < 1 {
+		buffers = 1
+	}
+	if p.maxCacheSize > 0 {
+		cacheLimitedBuffers := p.maxCacheSize / chunkSize
+		if cacheLimitedBuffers < 1 {
+			cacheLimitedBuffers = 1
+		}
+		if buffers > cacheLimitedBuffers {
+			buffers = cacheLimitedBuffers
+		}
+	}
+
+	p.prefetchMu.Lock()
+	gen := p.reversePrefetchGen
+	p.prefetchMu.Unlock()
+
+	anchorFrame = modFrame(anchorFrame, totalFrames)
+	chunkCount := (totalFrames + chunkSize - 1) / chunkSize
+	if chunkCount < 1 {
+		chunkCount = 1
+	}
+	if buffers > chunkCount {
+		buffers = chunkCount
+	}
+	baseChunk := anchorFrame / chunkSize
+
+	step := 1
+	if direction < 0 {
+		step = -1
+	}
+	preferred := []int{
+		modFrame(baseChunk+step, chunkCount), // direction-first
+		baseChunk,                            // current
+		modFrame(baseChunk-step, chunkCount), // opposite side
+	}
+
+	seen := make(map[int]struct{}, len(preferred))
+	queued := 0
+	for _, chunkIdx := range preferred {
+		if queued >= buffers {
+			break
+		}
+		if _, exists := seen[chunkIdx]; exists {
+			continue
+		}
+		seen[chunkIdx] = struct{}{}
+		chunkStart := chunkIdx * chunkSize
+		chunkEnd := chunkStart + chunkSize - 1
+		if chunkEnd >= totalFrames {
+			chunkEnd = totalFrames - 1
+		}
+		p.queueReversePrefetch(chunkStart, chunkEnd, gen)
+		queued++
+	}
+}
+
+func (p *Player) waitForCachedFrame(frame int, timeout time.Duration) ([]byte, bool) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if img, ok := p.getCache(frame); ok {
+			return img, true
+		}
+		if time.Now().After(deadline) {
+			return nil, false
+		}
+		time.Sleep(4 * time.Millisecond)
+	}
+}
+
+func (p *Player) reversePrefetchWorker() {
+	for job := range p.reversePrefetchJobs {
+		p.prefetchMu.Lock()
+		currentGen := p.reversePrefetchGen
+		p.prefetchMu.Unlock()
+
+		if job.gen != currentGen {
+			continue
+		}
+
+		if !p.isRangeCached(job.start, job.end) {
+			p.fetchChunk(job.start, job.end)
+		}
+
+		p.prefetchMu.Lock()
+		if job.gen == p.reversePrefetchGen {
+			delete(p.reversePrefetchQueued, job.key)
+		}
+		p.prefetchMu.Unlock()
+	}
+}
+
 func (p *Player) Load(file string) error {
 	if _, err := os.Stat(file); os.IsNotExist(err) {
 		return fmt.Errorf("file does not exist: %s", file)
@@ -113,6 +328,7 @@ func (p *Player) Load(file string) error {
 	totalFrames := int(duration * fps)
 
 	p.clearCache()
+	p.resetReversePrefetch()
 
 	p.mu.Lock()
 	p.state.File = file
@@ -133,6 +349,7 @@ func (p *Player) Play() {
 	p.mu.Lock()
 	p.state.PlayDirection = 1
 	p.mu.Unlock()
+	p.resetReversePrefetch()
 	p.playChan <- true
 }
 
@@ -140,6 +357,7 @@ func (p *Player) PlayBackward() {
 	p.mu.Lock()
 	p.state.PlayDirection = -1
 	p.mu.Unlock()
+	p.resetReversePrefetch()
 	p.playChan <- true
 }
 
@@ -148,10 +366,12 @@ func (p *Player) Pause() {
 }
 
 func (p *Player) Step(frames int) {
+	p.resetReversePrefetch()
 	p.stepChan <- frames
 }
 
 func (p *Player) Seek(frame int) {
+	p.resetReversePrefetch()
 	p.seekChan <- frame
 }
 
@@ -245,6 +465,11 @@ func (p *Player) parseJPEGsAndCache(r io.Reader, startFrame int, frameChan chan<
 
 func (p *Player) loop() {
 	var lastTick time.Time
+	var idlePrefetchAnchor int = -1
+	var idlePrefetchDir int = 1
+	var idlePrefetchSince time.Time
+	var idlePrimaryRefresh time.Time
+	var idleOppositeQueued bool
 	seekAndRender := func(targetFrame int, resumePlaying bool) {
 		p.mu.Lock()
 		if p.state.File == "" || p.state.TotalFrames <= 0 {
@@ -276,10 +501,15 @@ func (p *Player) loop() {
 
 			p.mu.RLock()
 			playDir := p.state.PlayDirection
+			totalFrames := p.state.TotalFrames
 			p.mu.RUnlock()
 
-			if resumePlaying && playDir > 0 {
-				p.restartFFmpeg(targetFrame)
+			if resumePlaying {
+				if playDir > 0 {
+					p.restartFFmpeg(targetFrame)
+				} else if playDir < 0 {
+					p.scheduleDirectionalPrefetch(targetFrame, totalFrames, playDir, 2)
+				}
 			}
 			return
 		}
@@ -303,6 +533,16 @@ func (p *Player) loop() {
 			p.broadcastImage(img)
 		}
 		p.broadcastState()
+
+		if ok && resumePlaying {
+			p.mu.RLock()
+			playDir := p.state.PlayDirection
+			totalFrames := p.state.TotalFrames
+			p.mu.RUnlock()
+			if playDir < 0 {
+				p.scheduleDirectionalPrefetch(targetFrame, totalFrames, playDir, 2)
+			}
+		}
 	}
 
 	for {
@@ -315,6 +555,9 @@ func (p *Player) loop() {
 
 		case play := <-p.playChan:
 			p.mu.Lock()
+			currentFrame := p.state.CurrentFrame
+			totalFrames := p.state.TotalFrames
+			playDir := p.state.PlayDirection
 			if p.state.File != "" {
 				p.state.Playing = play
 				if play {
@@ -322,6 +565,10 @@ func (p *Player) loop() {
 				}
 			}
 			p.mu.Unlock()
+
+			if play && playDir < 0 {
+				p.scheduleDirectionalPrefetch(currentFrame, totalFrames, playDir, 2)
+			}
 			p.broadcastState()
 
 		case targetFrame := <-p.seekChan:
@@ -354,7 +601,11 @@ func (p *Player) loop() {
 
 			if delta < 0 {
 				if _, ok := p.getCache(target); !ok {
-					chunkStart := target - 60
+					stepPrefetchSize := p.reverseChunkSize
+					if stepPrefetchSize > 180 {
+						stepPrefetchSize = 180
+					}
+					chunkStart := target - stepPrefetchSize + 1
 					if chunkStart < 0 {
 						chunkStart = 0
 					}
@@ -375,9 +626,41 @@ func (p *Player) loop() {
 			p.mu.Unlock()
 
 			if !playing || file == "" {
+				if !playing && file != "" && totalFrames > 0 {
+					now := time.Now()
+					if playDirection == 0 {
+						playDirection = 1
+					}
+					anchorChanged := idlePrefetchAnchor != currentFrame || idlePrefetchDir != playDirection
+
+					if anchorChanged || idlePrefetchSince.IsZero() {
+						idlePrefetchAnchor = currentFrame
+						idlePrefetchDir = playDirection
+						idlePrefetchSince = now
+						idlePrimaryRefresh = now
+						idleOppositeQueued = false
+						p.scheduleDirectionalPrefetch(currentFrame, totalFrames, playDirection, 2)
+					} else {
+						if now.Sub(idlePrimaryRefresh) >= 350*time.Millisecond {
+							p.scheduleDirectionalPrefetch(currentFrame, totalFrames, playDirection, 2)
+							idlePrimaryRefresh = now
+						}
+						if !idleOppositeQueued && now.Sub(idlePrefetchSince) >= 750*time.Millisecond {
+							p.scheduleDirectionalPrefetch(currentFrame, totalFrames, -playDirection, 1)
+							idleOppositeQueued = true
+						}
+					}
+				} else {
+					idlePrefetchAnchor = -1
+					idlePrefetchSince = time.Time{}
+					idleOppositeQueued = false
+				}
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
+			idlePrefetchAnchor = -1
+			idlePrefetchSince = time.Time{}
+			idleOppositeQueued = false
 
 			now := time.Now()
 			elapsed := now.Sub(lastTick).Seconds()
@@ -405,31 +688,45 @@ func (p *Player) loop() {
 						target += totalFrames
 					}
 
+					p.scheduleDirectionalPrefetch(target, totalFrames, playDirection, 2)
+
+					rendered := false
 					if img, ok := p.getCache(target); ok {
 						p.mu.Lock()
 						p.state.CurrentFrame = target
 						p.currentImage = img
 						p.mu.Unlock()
 						p.broadcastImage(img)
-						p.broadcastState()
-					} else {
-						chunkStart := target - 120
-						if chunkStart < 0 {
-							chunkStart = 0
+						rendered = true
+					}
+					if !rendered {
+						if img, ok := p.waitForCachedFrame(target, 120*time.Millisecond); ok {
+							p.mu.Lock()
+							p.state.CurrentFrame = target
+							p.currentImage = img
+							p.mu.Unlock()
+							p.broadcastImage(img)
+							rendered = true
 						}
-						p.fetchChunk(chunkStart, target)
-
+					}
+					if !rendered {
+						// Minimal synchronous recovery for rare misses while background prefetch catches up.
+						p.fetchChunk(target, target)
 						if img, ok := p.getCache(target); ok {
 							p.mu.Lock()
 							p.state.CurrentFrame = target
 							p.currentImage = img
 							p.mu.Unlock()
 							p.broadcastImage(img)
-						} else {
-							seekAndRender(target, true)
+							rendered = true
 						}
-						p.broadcastState()
 					}
+					if rendered {
+						p.broadcastState()
+						continue
+					}
+
+					seekAndRender(target, true)
 					continue
 				}
 
