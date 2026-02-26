@@ -57,6 +57,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (document.activeElement !== fpsInput) {
             fpsInput.value = state.playFPS;
         }
+
+        // FPS control visibility
+        setFpsBtn.style.display = isPlaying ? 'none' : 'inline-block';
+        fpsInput.disabled = isPlaying;
         
         const playbackDirection = playDirection < 0 ? 'Reverse' : 'Forward';
         statusDiv.textContent = `File: ${state.file || 'None'} | Native FPS: ${state.fps ? state.fps.toFixed(2) : 0} | Direction: ${playbackDirection}`;
@@ -72,8 +76,20 @@ document.addEventListener('DOMContentLoaded', () => {
     loadBtn.onclick = () => {
         const file = fileInput.value.trim();
         if (file) {
-            statusDiv.textContent = 'Loading...';
-            postCmd('/api/load', { file }).catch(e => console.error(e));
+            statusDiv.textContent = `Loading: ${file}...`;
+            postCmd('/api/load', { file })
+                .then(response => {
+                    if (!response.ok) {
+                        return response.text().then(text => {
+                            statusDiv.textContent = `Error: ${text}`;
+                            console.error('Load error:', text);
+                        });
+                    }
+                })
+                .catch(e => {
+                    statusDiv.textContent = `Network Error: ${e.message}`;
+                    console.error(e);
+                });
         }
     };
 

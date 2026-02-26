@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -316,14 +317,24 @@ func (p *Player) reversePrefetchWorker() {
 }
 
 func (p *Player) Load(file string) error {
+	file = strings.Trim(strings.TrimSpace(file), "\"")
+	file = filepath.Clean(file)
+	log.Printf("Load: Cleaned file path: %s", file)
 	if _, err := os.Stat(file); os.IsNotExist(err) {
+		log.Printf("Load: File does not exist at %s: %v", file, err)
 		return fmt.Errorf("file does not exist: %s", file)
+	} else if err != nil {
+		log.Printf("Load: Error checking file %s: %v", file, err)
+		return fmt.Errorf("error accessing file: %v", err)
 	}
 
+	log.Printf("Load: Attempting to get metadata for %s", file)
 	fps, duration, err := getMetadata(file)
 	if err != nil {
+		log.Printf("Load: ffprobe failed for %s: %v", file, err)
 		return fmt.Errorf("ffprobe failed: %v", err)
 	}
+	log.Printf("Load: Metadata retrieved - FPS: %f, Duration: %f", fps, duration)
 
 	totalFrames := int(duration * fps)
 
@@ -340,6 +351,11 @@ func (p *Player) Load(file string) error {
 	p.state.Playing = false
 	p.state.PlayDirection = 1
 	p.mu.Unlock()
+
+	if totalFrames > 0 && totalFrames <= p.maxCacheSize {
+		log.Printf("Load: Video fits in cache (%d <= %d), starting full prefetch", totalFrames, p.maxCacheSize)
+		go p.fetchChunk(0, totalFrames-1)
+	}
 
 	p.seekChan <- 0
 	return nil
@@ -502,11 +518,14 @@ func (p *Player) loop() {
 			p.mu.RLock()
 			playDir := p.state.PlayDirection
 			totalFrames := p.state.TotalFrames
+			isFullyCached := totalFrames > 0 && p.isRangeCached(0, totalFrames-1)
 			p.mu.RUnlock()
 
 			if resumePlaying {
 				if playDir > 0 {
-					p.restartFFmpeg(targetFrame)
+					if !isFullyCached {
+						p.restartFFmpeg(targetFrame)
+					}
 				} else if playDir < 0 {
 					p.scheduleDirectionalPrefetch(targetFrame, totalFrames, playDir, 2)
 				}
@@ -736,10 +755,20 @@ func (p *Player) loop() {
 				for i := 0; i < expectedFrames; i++ {
 					p.mu.RLock()
 					atEnd := p.state.CurrentFrame >= p.state.TotalFrames-1
+					nextFrame := p.state.CurrentFrame + 1
 					p.mu.RUnlock()
 					if atEnd {
 						loopToStart = true
 						break
+					}
+
+					if cachedImg, ok := p.getCache(nextFrame); ok {
+						img = cachedImg
+						p.mu.Lock()
+						p.state.CurrentFrame = nextFrame
+						p.currentImage = img
+						p.mu.Unlock()
+						continue
 					}
 
 					frame, ok := p.readFrame(750 * time.Millisecond)
@@ -792,6 +821,10 @@ func (p *Player) readFrame(timeout time.Duration) ([]byte, bool) {
 }
 
 func (p *Player) restartFFmpeg(frame int) {
+	if _, ok := p.getCache(frame); ok {
+		return
+	}
+
 	if p.cmd != nil {
 		p.cmd.Process.Kill()
 		p.cmd.Wait()
@@ -849,13 +882,13 @@ func getMetadata(file string) (float64, float64, error) {
 		"-of", "csv=p=0",
 		file,
 	)
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("ffprobe command failed: %v, output: %s", err, string(out))
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) == 0 {
-		return 0, 0, fmt.Errorf("unexpected ffprobe output: %s", string(out))
+	if len(lines) == 0 || lines[0] == "" {
+		return 0, 0, fmt.Errorf("unexpected ffprobe output (no lines): %s", string(out))
 	}
 
 	fields := strings.Split(lines[0], ",")
@@ -863,13 +896,18 @@ func getMetadata(file string) (float64, float64, error) {
 		return 0, 0, fmt.Errorf("unexpected fields: %s", lines[0])
 	}
 
-	fpsStr := strings.Split(fields[0], "/")
-	if len(fpsStr) != 2 {
-		return 0, 0, fmt.Errorf("invalid fps format: %s", fields[0])
+	fpsField := strings.TrimSpace(fields[0])
+	fpsStr := strings.Split(fpsField, "/")
+	var fps float64
+	if len(fpsStr) == 2 {
+		num, _ := strconv.ParseFloat(strings.TrimSpace(fpsStr[0]), 64)
+		den, _ := strconv.ParseFloat(strings.TrimSpace(fpsStr[1]), 64)
+		if den != 0 {
+			fps = num / den
+		}
+	} else if len(fpsStr) == 1 {
+		fps, _ = strconv.ParseFloat(strings.TrimSpace(fpsStr[0]), 64)
 	}
-	num, _ := strconv.ParseFloat(fpsStr[0], 64)
-	den, _ := strconv.ParseFloat(fpsStr[1], 64)
-	fps := num / den
 
 	var duration float64
 	if len(fields) > 1 {
@@ -877,10 +915,14 @@ func getMetadata(file string) (float64, float64, error) {
 	}
 
 	if duration == 0 {
+		log.Printf("getMetadata: Duration is 0, trying fallback ffprobe for %s", file)
 		cmd = exec.Command("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file)
-		out, err = cmd.Output()
+		out, err = cmd.CombinedOutput()
 		if err == nil {
 			duration, _ = strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+			log.Printf("getMetadata: Fallback duration: %f", duration)
+		} else {
+			log.Printf("getMetadata: Fallback ffprobe failed: %v, output: %s", err, string(out))
 		}
 	}
 

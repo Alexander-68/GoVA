@@ -51,8 +51,10 @@ func handleLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	r.ParseForm()
 	file := r.FormValue("file")
+	log.Printf("Loading video file: %s", file)
 	err := p.Load(file)
 	if err != nil {
+		log.Printf("Error loading video file %s: %v", file, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
