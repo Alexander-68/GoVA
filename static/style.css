@@ -89,6 +89,12 @@ button:hover {
     position: relative;
 }
 
+.video-stage {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
 #videoStream {
     max-width: 100%;
     max-height: 100%;
@@ -127,6 +133,11 @@ button:hover {
     flex-wrap: wrap;
 }
 
+.timeline-container {
+    width: 100%;
+    margin: 0 auto;
+}
+
 .playback-controls button {
     font-size: 1.2rem;
     padding: 8px 20px;
@@ -140,8 +151,9 @@ button:hover {
 }
 
 #frameSlider {
-    flex-grow: 1;
+    width: 100%;
     cursor: pointer;
+    display: block;
 }
 
 #frameInput {

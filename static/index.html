@@ -17,9 +17,14 @@
         </header>
 
         <main>
-            <div class="video-container">
-                <img id="videoStream" src="" alt="Video Stream">
-                <div id="frameWatermark" class="frame-watermark">Frame 0</div>
+            <div class="video-stage">
+                <div class="video-container">
+                    <img id="videoStream" src="" alt="Video Stream">
+                    <div id="frameWatermark" class="frame-watermark">Frame 0</div>
+                </div>
+                <div id="timelineContainer" class="timeline-container">
+                    <input type="range" id="frameSlider" min="0" value="0">
+                </div>
             </div>
             
             <div class="controls-container">
@@ -34,7 +39,6 @@
                     <label for="frameInput">Frame:</label>
                     <input type="number" id="frameInput" min="0" value="0">
                     <span id="totalFramesDisplay">/ 0</span>
-                    <input type="range" id="frameSlider" min="0" value="0">
                 </div>
 
                 <div class="fps-controls">

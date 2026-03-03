@@ -390,7 +390,18 @@ func (p *Player) Step(frames int) {
 
 func (p *Player) Seek(frame int) {
 	p.resetReversePrefetch()
-	p.seekChan <- frame
+	select {
+	case p.seekChan <- frame:
+	default:
+		select {
+		case <-p.seekChan:
+		default:
+		}
+		select {
+		case p.seekChan <- frame:
+		default:
+		}
+	}
 }
 
 func (p *Player) SetFPS(fps float64) {

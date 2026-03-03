@@ -11,7 +11,9 @@ GoVA is a minimal, frame-accurate video annotation tool powered by a Go backend 
 
 - **Backend-Driven Playback**: The Go backend determines the precise frame position. The browser acts merely as a thin display layer.
 - **Anywhere in filesystem**: Load video files by passing an absolute path from the CLI or via the web UI.
-- **Responsive Controls**: Seek via frame number, step accurately by individual frames (-1 / +1), and dynamic framerate overrides (1 to 240 fps).
+- **Responsive Controls**: Seek via frame number or timeline slider, step accurately by individual frames (-1 / +1), and dynamic framerate overrides (1 to 240 fps).
+- **Canvas-Aligned Timeline**: The play-position bar is rendered directly below the video and always uses the full video viewport width (landscape canvas width) for finer positioning.
+- **Live Drag Scrubbing**: Dragging the timeline sends immediate backend seek updates while the mouse is moving; no wait for mouse-button release.
 - **Pause-Only Frame Input Editing**: During playback, the frame number field is display-only. Entering a target frame number is enabled only while paused.
 - **Latest-Frame Stream Delivery**: The MJPEG broadcaster drops stale queued frames per subscriber so pause/seek/step actions show the intended frame immediately instead of an older buffered frame.
 - **Frame Watermark Toggle**: UI button toggles an in-video frame-number watermark (`Frame N`) for easier verification during seek/step debugging.

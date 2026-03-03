@@ -2,7 +2,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const fileInput = document.getElementById('fileInput');
     const loadBtn = document.getElementById('loadBtn');
     
+    const videoContainer = document.querySelector('.video-container');
     const videoStream = document.getElementById('videoStream');
+    const timelineContainer = document.getElementById('timelineContainer');
     const playPauseBtn = document.getElementById('playPauseBtn');
     const playBackBtn = document.getElementById('playBackBtn');
     const stepBackBtn = document.getElementById('stepBackBtn');
@@ -25,6 +27,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let totalFrames = 0;
     let currentFile = "";
     let watermarkEnabled = localStorage.getItem('gova.watermark') !== '0';
+    let pendingSeekFrame = null;
+    let seekRequestInFlight = false;
 
     const applyWatermarkVisibility = () => {
         const visible = watermarkEnabled && !!currentFile;
@@ -33,7 +37,44 @@ document.addEventListener('DOMContentLoaded', () => {
         watermarkToggleBtn.classList.toggle('toggle-off', !watermarkEnabled);
     };
 
+    const syncTimelineWidthToCanvas = () => {
+        const viewportWidth = Math.round(videoContainer.getBoundingClientRect().width);
+        timelineContainer.style.width = viewportWidth > 0 ? `${viewportWidth}px` : '100%';
+    };
+
+    const seekToFrame = (frame) => {
+        if (!Number.isInteger(frame) || frame < 0 || frame >= totalFrames) {
+            return;
+        }
+        pendingSeekFrame = frame;
+        if (seekRequestInFlight) {
+            return;
+        }
+
+        seekRequestInFlight = true;
+        const flushSeek = () => {
+            if (pendingSeekFrame === null) {
+                seekRequestInFlight = false;
+                return;
+            }
+
+            const frameToSeek = pendingSeekFrame;
+            pendingSeekFrame = null;
+            postCmd('/api/seek', { frame: frameToSeek })
+                .catch(e => console.error('Seek error:', e))
+                .finally(flushSeek);
+        };
+        flushSeek();
+    };
+
     applyWatermarkVisibility();
+    syncTimelineWidthToCanvas();
+
+    if (window.ResizeObserver) {
+        const resizeObserver = new ResizeObserver(syncTimelineWidthToCanvas);
+        resizeObserver.observe(videoContainer);
+    }
+    window.addEventListener('resize', syncTimelineWidthToCanvas);
 
     // Connect Server-Sent Events for state updates
     const stateSource = new EventSource('/state');
@@ -66,6 +107,7 @@ document.addEventListener('DOMContentLoaded', () => {
             currentFile = state.file;
             videoStream.src = `/stream?t=${Date.now()}`;
             applyWatermarkVisibility();
+            syncTimelineWidthToCanvas();
         }
         frameWatermark.textContent = `Frame ${state.currentFrame}`;
         
@@ -128,12 +170,6 @@ document.addEventListener('DOMContentLoaded', () => {
     stepBackBtn.onclick = () => postCmd('/api/step', { frames: -1 });
     stepFwdBtn.onclick = () => postCmd('/api/step', { frames: 1 });
 
-    const seekToFrame = (frame) => {
-        if (frame >= 0 && frame < totalFrames) {
-            postCmd('/api/seek', { frame });
-        }
-    };
-
     frameInput.onchange = (e) => {
         if (isPlaying) {
             e.target.value = frameSlider.value;
@@ -144,11 +180,14 @@ document.addEventListener('DOMContentLoaded', () => {
     
     frameSlider.oninput = (e) => {
         isSeeking = true;
-        frameInput.value = e.target.value;
+        const frame = parseInt(e.target.value, 10);
+        frameInput.value = frame;
+        frameWatermark.textContent = `Frame ${frame}`;
+        seekToFrame(frame);
     };
     
     frameSlider.onchange = (e) => {
-        seekToFrame(parseInt(e.target.value));
+        seekToFrame(parseInt(e.target.value, 10));
         isSeeking = false;
     };
 
