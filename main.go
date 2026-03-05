@@ -28,16 +28,16 @@ func main() {
 
 	http.Handle("/", http.FileServer(http.Dir("./static")))
 
-	http.HandleFunc("/api/load", handleLoad)
-	http.HandleFunc("/api/play", handlePlay)
-	http.HandleFunc("/api/play-backward", handlePlayBackward)
-	http.HandleFunc("/api/pause", handlePause)
-	http.HandleFunc("/api/step", handleStep)
-	http.HandleFunc("/api/seek", handleSeek)
-	http.HandleFunc("/api/fps", handleFPS)
+	http.HandleFunc("POST /api/load", handleLoad)
+	http.HandleFunc("POST /api/play", handlePlay)
+	http.HandleFunc("POST /api/play-backward", handlePlayBackward)
+	http.HandleFunc("POST /api/pause", handlePause)
+	http.HandleFunc("POST /api/step", handleStep)
+	http.HandleFunc("POST /api/seek", handleSeek)
+	http.HandleFunc("POST /api/fps", handleFPS)
 
-	http.HandleFunc("/stream", handleStream)
-	http.HandleFunc("/state", handleState)
+	http.HandleFunc("GET /stream", handleStream)
+	http.HandleFunc("GET /state", handleState)
 
 	addr := fmt.Sprintf(":%d", *portFlag)
 	log.Printf("Starting GoVA server on http://localhost%s", addr)
@@ -45,10 +45,6 @@ func main() {
 }
 
 func handleLoad(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	r.ParseForm()
 	file := r.FormValue("file")
 	log.Printf("Loading video file: %s", file)

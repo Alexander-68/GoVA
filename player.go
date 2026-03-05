@@ -69,12 +69,7 @@ func NewPlayer(maxCacheSize int) *Player {
 	reverseChunkSize := 180
 	if maxCacheSize > 0 {
 		reverseChunkSize = maxCacheSize / reverseChunkBuffers
-		if reverseChunkSize < 90 {
-			reverseChunkSize = 90
-		}
-		if reverseChunkSize > maxCacheSize {
-			reverseChunkSize = maxCacheSize
-		}
+		reverseChunkSize = max(90, min(reverseChunkSize, maxCacheSize))
 	}
 
 	p := &Player{
@@ -216,27 +211,10 @@ func (p *Player) scheduleDirectionalPrefetch(anchorFrame, totalFrames, direction
 		direction = 1
 	}
 
-	chunkSize := p.reverseChunkSize
-	if chunkSize < 1 {
-		chunkSize = 1
-	}
-	if buffers < 1 {
-		buffers = 1
-	}
-	if buffers > p.reverseChunkBuffers {
-		buffers = p.reverseChunkBuffers
-	}
-	if buffers < 1 {
-		buffers = 1
-	}
+	chunkSize := max(1, p.reverseChunkSize)
+	buffers = max(1, min(buffers, p.reverseChunkBuffers))
 	if p.maxCacheSize > 0 {
-		cacheLimitedBuffers := p.maxCacheSize / chunkSize
-		if cacheLimitedBuffers < 1 {
-			cacheLimitedBuffers = 1
-		}
-		if buffers > cacheLimitedBuffers {
-			buffers = cacheLimitedBuffers
-		}
+		buffers = min(buffers, max(1, p.maxCacheSize/chunkSize))
 	}
 
 	p.prefetchMu.Lock()
@@ -244,13 +222,8 @@ func (p *Player) scheduleDirectionalPrefetch(anchorFrame, totalFrames, direction
 	p.prefetchMu.Unlock()
 
 	anchorFrame = modFrame(anchorFrame, totalFrames)
-	chunkCount := (totalFrames + chunkSize - 1) / chunkSize
-	if chunkCount < 1 {
-		chunkCount = 1
-	}
-	if buffers > chunkCount {
-		buffers = chunkCount
-	}
+	chunkCount := max(1, (totalFrames + chunkSize - 1) / chunkSize)
+	buffers = min(buffers, chunkCount)
 	baseChunk := anchorFrame / chunkSize
 
 	step := 1
@@ -523,12 +496,7 @@ func (p *Player) loop() {
 			p.broadcastState()
 			return
 		}
-		if targetFrame < 0 {
-			targetFrame = 0
-		}
-		if targetFrame >= p.state.TotalFrames {
-			targetFrame = p.state.TotalFrames - 1
-		}
+		targetFrame = max(0, min(targetFrame, p.state.TotalFrames-1))
 		p.mu.Unlock()
 
 		if img, ok := p.getCache(targetFrame); ok {
@@ -648,25 +616,13 @@ func (p *Player) loop() {
 				continue
 			}
 			p.state.Playing = false
-			target := p.state.CurrentFrame + delta
-			if target < 0 {
-				target = 0
-			}
-			if target >= p.state.TotalFrames {
-				target = p.state.TotalFrames - 1
-			}
+			target := max(0, min(p.state.CurrentFrame+delta, p.state.TotalFrames-1))
 			p.mu.Unlock()
 
 			if delta < 0 {
 				if _, ok := p.getCache(target); !ok {
-					stepPrefetchSize := p.reverseChunkSize
-					if stepPrefetchSize > 180 {
-						stepPrefetchSize = 180
-					}
-					chunkStart := target - stepPrefetchSize + 1
-					if chunkStart < 0 {
-						chunkStart = 0
-					}
+					stepPrefetchSize := min(p.reverseChunkSize, 180)
+					chunkStart := max(0, target-stepPrefetchSize+1)
 					p.fetchChunk(chunkStart, target)
 				}
 			}
@@ -791,7 +747,7 @@ func (p *Player) loop() {
 				var img []byte
 				loopToStart := false
 				stalled := false
-				for i := 0; i < expectedFrames; i++ {
+				for range expectedFrames {
 					p.mu.RLock()
 					atEnd := p.state.CurrentFrame >= p.state.TotalFrames-1
 					nextFrame := p.state.CurrentFrame + 1
